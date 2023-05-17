@@ -957,7 +957,7 @@ class Catalog(STACObject):
             if tqdm is not None:
                 progress_bar = tqdm(
                     total=len(chunks_items),
-                    desc="Creating items (based on chunks)",
+                    desc=f"Creating items (based on chunks, size={chunk_size})",
                 )   
                     
             with concurrent.futures.ThreadPoolExecutor(

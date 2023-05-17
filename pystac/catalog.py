@@ -43,6 +43,12 @@ from pystac.utils import (
     make_absolute_href,
     make_relative_href,
 )
+import concurrent.futures
+
+try:
+    from tqdm import tqdm
+except:
+    tqdm = None
 
 if TYPE_CHECKING:
     from pystac.asset import Asset
@@ -851,13 +857,43 @@ class Catalog(STACObject):
             lk for lk in self.links if lk.rel != pystac.RelType.ITEM
         ] + keep_item_links
 
-        return result
+        return result  
+    
+    def _save_items(self, items_include_self_link: bool, item_links: List[Link], dest_href: Optional[str] = None, stac_io: Optional[pystac.StacIO] = None):
+        """
+        Saves the items referenced by the provided item links.
+
+        Args:
+            items_include_self_link (bool): Whether to include the self link of the items in the saved objects.
+            item_links (List[Link]): The list of item links.
+            dest_href (str, optional): The destination href where the saved objects will be stored. Defaults to None.
+            stac_io (pystac.StacIO, optional): The StacIO implementation to use. Defaults to None.
+        """        
+        for item_link in item_links:
+            if item_link.is_resolved():
+                item = cast(pystac.Item, item_link.target)
+                if dest_href is not None:
+                    rel_href = make_relative_href(item.self_href, self.self_href)
+                    item_dest_href = make_absolute_href(
+                        rel_href, dest_href, start_is_dir=True
+                    )
+                    item.save_object(
+                        include_self_link=items_include_self_link,
+                        dest_href=item_dest_href,
+                        stac_io=stac_io,
+                    )
+                else:
+                    item.save_object(
+                        include_self_link=items_include_self_link, stac_io=stac_io
+                    )       
+                 
 
     def save(
         self,
         catalog_type: Optional[CatalogType] = None,
         dest_href: Optional[str] = None,
         stac_io: Optional[pystac.StacIO] = None,
+        **kwargs
     ) -> None:
         """Save this catalog and all it's children/item to files determined by the
         object's self link HREF or a specified path.
@@ -881,6 +917,12 @@ class Catalog(STACObject):
             hierarchical links will be relative URLs
             If the catalog  type is ``CatalogType.SELF_CONTAINED``, no self links will
             be included and hierarchical links will be relative URLs.
+            
+        Note:
+            Extra keywords are supported to use multi-threading duing items creation
+            parallel_io (boolean) : True when parallel writting is used otherwise False (default: False)
+            chunk_size (int) : Create chunks of items for parallel writting (default: 100 items per chunk)
+            max_workers(int|None) : Set the number of maximum workers in ThreadPoolExecutor instance (default: None)
         """
 
         root = self.get_root()
@@ -906,24 +948,32 @@ class Catalog(STACObject):
                     )
                 else:
                     child.save(stac_io=stac_io)
-
-        for item_link in self.get_item_links():
-            if item_link.is_resolved():
-                item = cast(pystac.Item, item_link.target)
-                if dest_href is not None:
-                    rel_href = make_relative_href(item.self_href, self.self_href)
-                    item_dest_href = make_absolute_href(
-                        rel_href, dest_href, start_is_dir=True
-                    )
-                    item.save_object(
-                        include_self_link=items_include_self_link,
-                        dest_href=item_dest_href,
-                        stac_io=stac_io,
-                    )
-                else:
-                    item.save_object(
-                        include_self_link=items_include_self_link, stac_io=stac_io
-                    )
+        
+        # parallelization of item creation for a large dataset            
+        if kwargs.get("parallel_io", False):
+            chunk_size: int = kwargs.get("chunk_size", 100)
+            max_workers = kwargs.get("max_workers", None)
+            chunks_items = [self.get_item_links()[i:i+chunk_size] for i in range(0, len(self.get_item_links()), chunk_size)]
+            if tqdm is not None:
+                progress_bar = tqdm(
+                    total=len(chunks_items),
+                    desc="Creating items (based on chunks)",
+                )   
+                    
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=max_workers
+            ) as executor:
+                futures = [executor.submit(self._save_items, items_include_self_link = items_include_self_link, item_links = item_links, dest_href = dest_href, stac_io = stac_io) for item_links in chunks_items]
+                for future in concurrent.futures.as_completed(futures):
+                    if tqdm is not None:
+                        progress_bar.update(1)
+        else:                       
+            self._save_items(
+                items_include_self_link=items_include_self_link, 
+                item_links=self.get_item_links(), 
+                dest_href=dest_href, 
+                stac_io=stac_io
+            )
 
         include_self_link = False
         # include a self link if this is the root catalog
